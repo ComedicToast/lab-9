@@ -2,6 +2,7 @@
 title: "Lab 9"
 format: html
 editor: source
+embed-resources: true
 ---
 
 # Library and function load
@@ -11,9 +12,12 @@ editor: source
 library(tidyverse)
 library(ggthemes)
 library(scales)
+library(ambient)
+library(tictoc)
+library(ggthemes)
 ```
 
-
+## For art piece 1
 ```{r}
 #| label: main art maker
 
@@ -75,33 +79,378 @@ sample_canva <- function(seed = NULL, n = 4) {
 }
 ```
 
+## For art piece 2
+
+```{r}
+edge_length <- function(x1, y1, x2, y2) {
+  sqrt((x1 - x2)^2 + (y1 - y2)^2)
+}
+
+edge_noise <- function(size) {
+  runif(1, min = -size/2, max = size/2)
+}
+
+sample_edge_l <- function(polygon) {
+  sample(length(polygon), 1, prob = map_dbl(polygon, ~ .x$seg_len))
+}
+
+# insert_edge_l <- function(polygon, noise) {
+#   
+#   ind <- sample_edge_l(polygon)
+#   len <- polygon[[ind]]$seg_len
+#   
+#   last_x <- polygon[[ind]]$x
+#   last_y <- polygon[[ind]]$y
+#   
+#   next_x <- polygon[[ind + 1]]$x
+#   next_y <- polygon[[ind + 1]]$y
+#   
+#   new_x <- (last_x + next_x) / 2 + edge_noise(len * noise)
+#   new_y <- (last_y + next_y) / 2 + edge_noise(len * noise)
+#   
+#   new_point <- list(
+#     x = new_x,
+#     y = new_y,
+#     seg_len = edge_length(new_x, new_y, next_x, next_y)
+#   )
+#   
+#   polygon[[ind]]$seg_len <- edge_length(
+#     last_x, last_y, new_x, new_y
+#   )
+#   
+#   c(
+#     polygon[1:ind],
+#     list(new_point),
+#     polygon[-(1:ind)]
+#   )
+# }
+
+insert_edge_l <- function(polygon, noise) {
+  
+  ind <- sample_edge_l(polygon)
+  len <- polygon[[ind]]$seg_len
+  
+  last_x <- polygon[[ind]]$x
+  last_y <- polygon[[ind]]$y
+  
+  # Handle wraparound for the last point
+  next_ind <- if(ind == length(polygon)) 1 else ind + 1
+  next_x <- polygon[[next_ind]]$x
+  next_y <- polygon[[next_ind]]$y
+  
+  new_x <- (last_x + next_x) / 2 + edge_noise(len * noise)
+  new_y <- (last_y + next_y) / 2 + edge_noise(len * noise)
+  
+  new_point <- list(
+    x = new_x,
+    y = new_y,
+    seg_len = edge_length(new_x, new_y, next_x, next_y)
+  )
+  
+  polygon[[ind]]$seg_len <- edge_length(
+    last_x, last_y, new_x, new_y
+  )
+  
+  # Handle insertion for last position
+  if(ind == length(polygon)) {
+    c(polygon, list(new_point))
+  } else {
+    c(
+      polygon[1:ind],
+      list(new_point),
+      polygon[-(1:ind)]
+    )
+  }
+}
+
+
+grow_polygon_l <- function(polygon, iterations, noise, seed = NULL) {
+  if(!is.null(seed)) set.seed(seed)
+  for(i in 1:iterations) polygon <- insert_edge_l(polygon, noise)
+  return(polygon)
+}
+
+grow_multipolygon_l <- function(base_shape, n, seed = NULL, ...) {
+  if(!is.null(seed)) set.seed(seed)
+  polygons <- list()
+  for(i in 1:n) {
+    polygons[[i]] <- grow_polygon_l(base_shape, ...) |>
+      transpose() |>
+      as_tibble() |>
+      mutate(across(.fn = unlist))
+  }
+  polygons <- bind_rows(polygons, .id = "id")
+  polygons
+}
+
+show_multipolygon <- function(polygon, fill, alpha = .02, ...) {
+  ggplot(polygon, aes(x, y, group = id)) +
+    geom_polygon(colour = NA, alpha = alpha, fill = fill, ...) + 
+    coord_equal() + 
+    theme_void()
+}
+```
+
+```{r}
+smudged_hexagon <- function(seed, noise1 = 0, noise2 = 2, noise3 = 0.5) {
+  set.seed(seed)
+  
+  # define hexagonal base shape
+  theta <- (0:6) * pi / 3
+  hexagon <- tibble(
+    x = sin(theta),
+    y = cos(theta),
+    seg_len = edge_length(x, y, lead(x), lead(y))
+  )
+  hexagon$seg_len[7] <- 0
+  hexagon <- transpose(hexagon)
+  base <- hexagon |> 
+    grow_polygon_l(
+      iterations = 60, 
+      noise = noise1
+    )
+  
+  # define intermediate-base-shapes in clusters
+  polygons <- list()
+  ijk <- 0
+  for(i in 1:3) {
+    base_i <- base |> 
+      grow_polygon_l(
+        iterations = 50, 
+        noise = noise2
+      )
+    
+    for(j in 1:3) {
+      base_j <- base_i |> 
+        grow_polygon_l(
+          iterations = 50, 
+          noise = noise2
+        )
+      
+      # grow 10 polygons per intermediate-base
+      for(k in 1:10) {
+        ijk <- ijk + 1
+        polygons[[ijk]] <- base_j |>
+          grow_polygon_l(
+            iterations = 500, 
+            noise = noise3
+          ) |>
+          transpose() |>
+          as_tibble() |>
+          mutate(across(.fn = unlist))
+      }
+    }
+  }
+  
+  # return as data frame
+  bind_rows(polygons, .id = "id")
+}
+```
+
+
+```{r}
+smudged_circle <- function(center_x = 0, center_y = 0, radius = 1, seed = 123, 
+                          noise_level = 0.3, iterations = 50, n_points = 24) {
+  set.seed(seed)
+  
+  # Create circular base shape as list format
+  theta <- seq(0, 2*pi, length.out = n_points + 1)[1:n_points]
+  
+  # Create polygon as list of points (format expected by grow_polygon_l)
+  polygon <- list()
+  for(i in 1:n_points) {
+    next_i <- if(i == n_points) 1 else i + 1
+    x_curr <- center_x + radius * sin(theta[i])
+    y_curr <- center_y + radius * cos(theta[i])
+    x_next <- center_x + radius * sin(theta[next_i])
+    y_next <- center_y + radius * cos(theta[next_i])
+    
+    polygon[[i]] <- list(
+      x = x_curr,
+      y = y_curr,
+      seg_len = edge_length(x_curr, y_curr, x_next, y_next)
+    )
+  }
+  
+  # Apply smudging
+  smudged <- grow_polygon_l(polygon, iterations = iterations, noise = noise_level)
+  
+  # Convert back to tibble for plotting
+  result <- tibble(
+    x = map_dbl(smudged, ~ .x$x),
+    y = map_dbl(smudged, ~ .x$y)
+  )
+  
+  return(result)
+}
+```
+
+```{r}
+smudged_circle_multi <- function(center_x = 0, center_y = 0, radius = 1, seed = 123, 
+                                noise1 = 0, noise2 = 2, noise3 = 0.5, n_points = 12) {
+  set.seed(seed)
+  
+  # Create circular base shape as list format
+  theta <- seq(0, 2*pi, length.out = n_points + 1)[1:n_points]
+  
+  # Create base polygon
+  base_polygon <- list()
+  for(i in 1:n_points) {
+    next_i <- if(i == n_points) 1 else i + 1
+    x_curr <- center_x + radius * sin(theta[i])
+    y_curr <- center_y + radius * cos(theta[i])
+    x_next <- center_x + radius * sin(theta[next_i])
+    y_next <- center_y + radius * cos(theta[next_i])
+    
+    base_polygon[[i]] <- list(
+      x = x_curr,
+      y = y_curr,
+      seg_len = edge_length(x_curr, y_curr, x_next, y_next)
+    )
+  }
+  
+  # Grow base polygon with first noise level
+  base <- base_polygon |>
+    grow_polygon_l(iterations = 60, noise = noise1)
+  
+  # Create multiple intermediate-base-shapes and final polygons (like original)
+  polygons <- list()
+  ijk <- 0
+  
+  for(i in 1:3) {
+    base_i <- base |>
+      grow_polygon_l(iterations = 50, noise = noise2)
+    
+    for(j in 1:3) {
+      base_j <- base_i |>
+        grow_polygon_l(iterations = 50, noise = noise2)
+      
+      # grow 10 polygons per intermediate-base
+      for(k in 1:10) {
+        ijk <- ijk + 1
+        final_polygon <- base_j |>
+          grow_polygon_l(iterations = 500, noise = noise3)
+        
+        # Convert to tibble format
+        polygons[[ijk]] <- tibble(
+          x = map_dbl(final_polygon, ~ .x$x),
+          y = map_dbl(final_polygon, ~ .x$y)
+        )
+      }
+    }
+  }
+  
+  # Return as data frame with id column
+  bind_rows(polygons, .id = "id")
+}
+```
+
+
+
 # Art piece 1
 
 ## Title: Cartesian Abstraction
 
 ```{r}
-dat <- sample_data(n = 1000, seed = 935) %>%
+#| warning: false
+dat1 <- sample_data(n = 1000, seed = 935) %>%
   mutate(y1 = y0, size = size/3)
 
 dat2 <- sample_data(n = 25, seed = 346)
-  
+
+dat3 <- sample_data(n = 25, seed = 789)
 
 cart_styled_plot(palette = sample_canva(seed = 1111)) +
-  geom_segment(data = dat, linetype = "3432") +
+  
+  geom_segment(data = dat1, linetype = "3432") +
+  
   geom_point(data = dat2 |> mutate(size = size/5), color = "gold") +
   geom_segment(data = dat2 |> mutate(size = size/100), lineend = "round", 
-    colour = "gold") 
+    colour = "gold") +
+  
+  geom_point(data = dat3 |> mutate(size = size/5), color = "skyblue") +
+  geom_segment(data = dat3 |> mutate(size = size/100), lineend = "round", 
+    colour = "skyblue") 
 ```
 
 ## Museum Description
 
-This piece represents 
+This piece is an abstract work representing the concept of chaotic order. There are two main features of the piece driving this. The first part of the piece is compromised of many varying rectangles with an appealing red and grey color pattern. While these rectangles may seem chaotically spread across the artwork, they come together to form an interesting background that works nicely. The second part of the piece is compromised of randomly dispersed circles with line segments projecting a path for them to follow. The circles appear more chaotic than the rectangles because there are less of them and they do not all form a union to create a bigger picture. However, they still have some semblance of order because they each have their own line to follow. The background is like life, and each circle is an individual. While life may appear chaotic, it all comes together to serve as a common backdrop for each individual. Each individual will not explore every single thing that life has to offer, but they will still explore what they can while following their own path.
 
 ## Description of code choices
 
+This piece was made primarily with Danielle Navaro's functions from her workshop, with a couple small tweaks. Both `sample_data()` and `sample_canva()` are the same as they are in the workshop, but I have modified `polar_styled_plot()` and changed it to `cartesian_style_plot()` by simply removing the `coord_polar()` line of the code.
+
+The first part of the art involves creating three data sets using the `sample_data()` function. These are used to plot the different shapes that make up the art. dat1 is for the background rectangle (of which there are 1000). It also has a `mutate()` to make the rectangles smaller and to ensure they start and end on the same point of the y-axis by setting y1 = y0. dat2 and dat3 are for the circles and line segments, with 25 for each dataset. The seeds for each data set didn't have much solid reasoning behind them. I used 935 for dat1 as a reference to Group 935 from Call of Duty Zombies and the other two were just sequential numbers.
+
+The art is then created using the `cart_styled_plot()` function. I chose a palette using the `sample_canva()` function and played around with seeds until I found the red and grey combination that I really liked. I then created the rectangle background using `geom_segment()` with the dat1 datset and a linetype adjustment. Using dat2 and dat3, the gold and blue circles and line segments were created with `geom_point()` and `geom_segment()`, as well adjusting their sizes by using `mutate()`. Points had their size reduced much less than the line segments did, and the line segments were given round ends using the lineend option.
+
+
 # Art piece 2
 
-```{r}
+## Title: The Wandering Caretaker
 
+```{r}
+#| cache: true
+# Create each component with the multi-polygon smudged effect
+face_border_data <- smudged_circle_multi(0, 0, 1.0, seed = 40, noise1 = 0, noise2 = 2, noise3 = 0.5)
+face_inner_data <- smudged_circle_multi(0, 0, 0.85, seed = 43, noise1 = 0, noise2 = 1.8, noise3 = 0.4)
+left_eye_data <- smudged_circle_multi(-0.3, 0.25, 0.15, seed = 44, noise1 = 0, noise2 = 1.5, noise3 = 0.3, n_points = 8)
+right_eye_data <- smudged_circle_multi(0.3, 0.25, 0.15, seed = 44, noise1 = 0, noise2 = 1.5, noise3 = 0.3, n_points = 8)
+
+# Mouth (stretch after generation)
+mouth_data <- smudged_circle_multi(0, -0.3, 0.12, seed = 46, noise1 = 0, noise2 = 1.5, noise3 = 0.35, n_points = 8)
+mouth_data$y <- mouth_data$y * 1.5  # stretch to make oval
 ```
+
+```{r}
+# Create the layered plot using show_multipolygon approach
+plot_base <- ggplot() + 
+  coord_equal() + 
+  theme_void() +
+  theme(
+    panel.background = element_rect(fill = "#0C1C3A", color = NA),
+    plot.background = element_rect(fill = "#0C1C3A", color = NA)
+  ) +
+  xlim(-1.35, 1.35) + 
+  ylim(-1.35, 1.35)
+
+# Layer the components with low alpha for smudged effect
+final_plot <- plot_base +
+  # Face border (brown)
+  geom_polygon(data = face_border_data, aes(x = x, y = y, group = id), 
+               colour = NA, alpha = 0.02, fill = "#8B4513") +
+  # Face inner (golden)
+  geom_polygon(data = face_inner_data, aes(x = x, y = y, group = id), 
+               colour = NA, alpha = 0.025, fill = "#DAA520") +
+  # Left eye (orange)
+  geom_polygon(data = left_eye_data, aes(x = x, y = y, group = id), 
+               colour = NA, alpha = 0.03, fill = "#FFA500") +
+  # Right eye (orange)
+  geom_polygon(data = right_eye_data, aes(x = x, y = y, group = id), 
+               colour = NA, alpha = 0.03, fill = "#FFA500") +
+  # Mouth (orange)
+  geom_polygon(data = mouth_data, aes(x = x, y = y, group = id), 
+               colour = NA, alpha = 0.03, fill = "#FFA500")
+
+final_plot
+```
+
+## Museum Description
+
+This piece is meant to be the mask of [Bard](https://universe.leagueoflegends.com/en_US/champion/bard/) from the game League of Legends. Bard is a cosmic figure that maintains harmony throughout the universe. The wispy nature of the art represents his affiliation with the cosmos, and the dark blue background symbolizes the night sky. His mask is created from trinkets and fabrics, but underneath is a powerful entity that seeks to serve the greater good.
+
+## Description of code choices
+
+This piece was made by referring to the Polygon Tricks lesson by Danielle Navaro. Specifically, I took the `smudged_hexagon()` function and, using Claude for assistance, converted it to a `smudged_circle_multi()` function that could plot multiple circles at once. It uses the same helper functions as `smudged_hexagon()`, with `insert_edge_l()` slightly altered to accommodate for the circular shape instead of the hexagonal one.
+
+Each circle is given different properties to create the mask. 
+
+-   The brown outermost circle is given a (0,0) coordinate set so it is centered, and a radius of 1 so it is the biggest circle. The seed was messed around with until a suitable wispy pattern was found, and the noise values were set to the same default ones as were used in `smudged_hexagon()`. 
+
+-   The golden circle is also given a (0,0) coordinate set to be centered, with a smaller radius than the previous circle so it would be inside of it. The noise values were a bit below the default ones since the shape is a little smaller.
+
+-   The eyes are given different coordinate sets so that they would be off-center but mirrored horizontally. They have a much smaller radius than the previous two circles (dare I say, the rough size of eyes on a mask). The noise values are again a bit smaller since the shapes are smaller, and the number of points that create the base circle are reduced from 12 to 8 since smaller polygons having less edges isn't as noticeable. 
+
+-   The mouth is given different coordinate sets as well, but is only moved downwards from the center. It has a slightly smaller radius than the eyes, but the polygon is stretched vertically to look more like a mouth shape. The noise3 value is set slightly higher than the eyes to give it a little more of the wispyness. n_points was again set to 8 for similar reasons as the eyes.
 
